@@ -144,7 +144,47 @@
             flex: 1;
             margin-right: 10px;
         }
+        
+        /* Video player styles */
+        .video-container {
+            margin-top: 20px;
+            background-color: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+            width: 100%;
+            max-width: 800px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .video-wrapper {
+            position: relative;
+            padding-bottom: 56.25%; /* 16:9 aspect ratio */
+            height: 0;
+        }
+        .video-wrapper video {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        .video-error {
+            color: #ff6b6b;
+            text-align: center;
+            padding: 20px;
+            background-color: #2a2a2a;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        .video-loading {
+            color: #ffd93d;
+            text-align: center;
+            padding: 20px;
+        }
     </style>
+    <!-- Load HLS.js from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 </head>
 <body>
     <div class="container">
@@ -202,6 +242,15 @@
                             </div>
                         </div>
                     </div>
+                    
+                    <!-- HLS Video Player -->
+                    <div id="videoPlayerContainer" class="video-container hidden">
+                        <h3>Live Stream Preview</h3>
+                        <div class="video-wrapper">
+                            <video id="videoPlayer" controls autoplay muted></video>
+                        </div>
+                        <div id="videoError" class="video-error hidden"></div>
+                    </div>
                 </div>
             </div>
 
@@ -251,6 +300,12 @@
         const managedStreamStatusDiv = document.getElementById('managedStreamStatus');
         const managedStatusTextDiv = document.getElementById('managedStatusText');
         const managedUrlsContainer = document.getElementById('managedUrlsContainer');
+        
+        // Video player elements
+        const videoPlayerContainer = document.getElementById('videoPlayerContainer');
+        const videoPlayer = document.getElementById('videoPlayer');
+        const videoError = document.getElementById('videoError');
+        let hlsInstance = null; // Keep track of HLS.js instance
 
         const currentUserId = '<%= userId %>'; // Will be empty if not authenticated
         
@@ -277,6 +332,88 @@
             }).catch(err => {
                 showMessage('Failed to copy URL', true);
             });
+        }
+        
+        // HLS Player Functions
+        function initHlsPlayer(hlsUrl) {
+            if (!hlsUrl) return;
+            
+            // Clean up existing instance
+            destroyHlsPlayer();
+            
+            // Show video container
+            videoPlayerContainer.classList.remove('hidden');
+            videoError.classList.add('hidden');
+            videoError.textContent = '';
+            
+            // Check for native HLS support (Safari)
+            if (videoPlayer.canPlayType('application/vnd.apple.mpegurl')) {
+                console.log('Using native HLS support (Safari)');
+                videoPlayer.src = hlsUrl;
+                videoPlayer.play().catch(e => {
+                    console.error('Playback failed:', e);
+                    showVideoError('Failed to start playback: ' + e.message);
+                });
+            }
+            // Use HLS.js for other browsers
+            else if (Hls.isSupported()) {
+                console.log('Using HLS.js');
+                hlsInstance = new Hls({
+                    debug: false,
+                    enableWorker: true,
+                    lowLatencyMode: true,
+                    backBufferLength: 90
+                });
+                
+                hlsInstance.loadSource(hlsUrl);
+                hlsInstance.attachMedia(videoPlayer);
+                
+                hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+                    videoPlayer.play().catch(e => {
+                        console.error('Playback failed:', e);
+                        showVideoError('Failed to start playback: ' + e.message);
+                    });
+                });
+                
+                hlsInstance.on(Hls.Events.ERROR, (event, data) => {
+                    console.error('HLS error:', data);
+                    if (data.fatal) {
+                        switch(data.type) {
+                            case Hls.ErrorTypes.NETWORK_ERROR:
+                                console.error('Fatal network error, trying to recover');
+                                showVideoError('Network error - stream may not be ready yet');
+                                hlsInstance.startLoad();
+                                break;
+                            case Hls.ErrorTypes.MEDIA_ERROR:
+                                console.error('Fatal media error, trying to recover');
+                                hlsInstance.recoverMediaError();
+                                break;
+                            default:
+                                showVideoError('Fatal error: ' + data.details);
+                                destroyHlsPlayer();
+                                break;
+                        }
+                    }
+                });
+            }
+            else {
+                showVideoError('HLS is not supported in this browser');
+            }
+        }
+        
+        function destroyHlsPlayer() {
+            if (hlsInstance) {
+                hlsInstance.destroy();
+                hlsInstance = null;
+            }
+            videoPlayer.src = '';
+            videoPlayer.load();
+            videoPlayerContainer.classList.add('hidden');
+        }
+        
+        function showVideoError(message) {
+            videoError.textContent = message;
+            videoError.classList.remove('hidden');
         }
 
         function showMessage(text, isError = false) {
@@ -330,8 +467,16 @@
                 } else {
                     document.getElementById('webrtcUrlRow').style.display = 'none';
                 }
+                
+                // Initialize HLS player when stream is active
+                initHlsPlayer(status.hlsUrl);
             } else {
                 managedUrlsContainer.classList.add('hidden');
+                
+                // Destroy player if stream is not active
+                if (status.status === 'stopped' || status.status === 'error') {
+                    destroyHlsPlayer();
+                }
             }
         }
 
@@ -487,6 +632,7 @@
                     if (result.success) {
                         showMessage('Stop managed stream request sent successfully!');
                         managedUrlsContainer.classList.add('hidden');
+                        destroyHlsPlayer(); // Clean up video player
                     } else {
                         showMessage(result.message || 'Failed to stop managed stream.', true);
                     }
